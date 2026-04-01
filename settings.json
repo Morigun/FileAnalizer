@@ -1,0 +1,17 @@
+{
+  "last_folder": "E:/Projects/Python/AOC",
+  "filter_extensions": ".py",
+  "filter_exclude": "",
+  "exclude_folders": ".venv",
+  "include_subfolders": true,
+  "sort_columns": [
+    [
+      "lines",
+      true
+    ],
+    [
+      "path",
+      true
+    ]
+  ]
+}

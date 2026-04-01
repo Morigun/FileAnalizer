@@ -1,0 +1,8 @@
+# File Analyzer Requirements
+# Note: tkinter is included with standard Python installation
+
+# No external dependencies required for basic functionality
+# The application uses only Python standard library modules:
+# - tkinter (UI)
+# - os (file operations)
+# - pathlib (path handling)
