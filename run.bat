@@ -66,7 +66,7 @@ echo ========================================
 echo.
 
 REM Run the application
-python "%SCRIPT_DIR%file_analyzer.py"
+python "%SCRIPT_DIR%main.py"
 
 REM Deactivate when done
 deactivate
