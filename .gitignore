@@ -32,3 +32,4 @@ venv.bak/
 .pytest_cache/
 .coverage
 htmlcov/
+analysis_history.json

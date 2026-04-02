@@ -9,10 +9,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
+from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 # Settings file path
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+HISTORY_FILE = Path(__file__).parent / "analysis_history.json"
 
 # Default settings
 DEFAULT_SETTINGS = {
@@ -22,6 +26,11 @@ DEFAULT_SETTINGS = {
     "exclude_folders": "",
     "include_subfolders": True,
     "sort_columns": []  # List of (column, reverse) tuples for multi-column sort
+}
+
+# History structure
+DEFAULT_HISTORY = {
+    "analyses": []  # List of analysis entries
 }
 
 
@@ -43,6 +52,9 @@ class FileAnalyzerApp:
         
         # Store file data for filtering/sorting
         self.file_data: List[Dict[str, Any]] = []
+        
+        # Load analysis history
+        self.history = self.load_history()
         
         self.setup_ui()
         self.load_saved_settings()
@@ -89,6 +101,42 @@ class FileAnalyzerApp:
             self.include_subfolders_var.set(self.settings["include_subfolders"])
         if self.settings.get("sort_columns"):
             self.sort_columns = [tuple(col) for col in self.settings["sort_columns"]]
+            
+    def load_history(self) -> Dict[str, Any]:
+        """Load analysis history from JSON file."""
+        try:
+            if HISTORY_FILE.exists():
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+        return DEFAULT_HISTORY.copy()
+        
+    def save_history(self):
+        """Save current analysis history to JSON file."""
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, indent=2)
+        except IOError as e:
+            print(f"Warning: Could not save history: {e}")
+            
+    def add_to_history(self, folder_path: str, total_files: int, total_lines: int, total_size: int, file_data: List[Dict[str, Any]]):
+        """Add current analysis to history."""
+        analysis_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "folder": folder_path,
+            "total_files": total_files,
+            "total_lines": total_lines,
+            "total_size": total_size,
+            "file_data": file_data
+        }
+        
+        # Add to history (keep last 50 analyses)
+        self.history["analyses"].append(analysis_entry)
+        if len(self.history["analyses"]) > 50:
+            self.history["analyses"] = self.history["analyses"][-50:]
+            
+        self.save_history()
         
     def setup_ui(self):
         """Setup the user interface components."""
@@ -204,6 +252,8 @@ class FileAnalyzerApp:
         
         # Bind keyboard events for sorting
         self.tree.bind("<Button-1>", self.on_tree_click)
+        # Bind double click for chart
+        self.tree.bind("<Double-1>", self.on_double_click)
         
         # Bottom frame for summary
         bottom_frame = ttk.Frame(main_frame)
@@ -221,7 +271,10 @@ class FileAnalyzerApp:
         clear_sort_btn.pack(side=tk.LEFT, padx=(0, 5))
         
         export_btn = ttk.Button(btn_frame, text="Export to CSV", command=self.export_to_csv)
-        export_btn.pack(side=tk.LEFT)
+        export_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        history_btn = ttk.Button(btn_frame, text="View History", command=self.show_history_window)
+        history_btn.pack(side=tk.LEFT)
         
         # Save settings on close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -236,6 +289,14 @@ class FileAnalyzerApp:
                 self.sort_column(col_name, shift_pressed=(event.state & 0x1) != 0)
                 return "break"  # Prevent default handling
         return None
+        
+    def on_double_click(self, event):
+        """Handle double click on tree to show chart."""
+        region = self.tree.identify("region", event.x, event.y)
+        if region == "cell":
+            item = self.tree.identify_row(event.y)
+            if item:
+                self.show_chart_for_selected_file(item)
         
     def on_close(self):
         """Handle window close - save settings."""
@@ -405,6 +466,9 @@ class FileAnalyzerApp:
         # Display data
         self.display_filtered_data()
         
+        # Save to history
+        self.add_to_history(folder, total_files, total_lines, total_size, self.file_data)
+        
         self.status_var.set(f"Analysis complete. Found {total_files} files.")
         self.summary_var.set(f"Total: {total_files} files | {total_lines:,} lines | {self.format_size(total_size)}")
         
@@ -509,13 +573,294 @@ class FileAnalyzerApp:
                     break
             self.tree.heading(col, text=text)
     
-    def format_size(self, size_bytes: int) -> str:
+    def format_size(self, size_bytes: float) -> str:
         """Format size in bytes to human readable format."""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size_bytes < 1024.0:
                 return f"{size_bytes:.2f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.2f} PB"
+        
+    def show_chart_for_selected_file(self, item_id: str):
+        """Show chart with history for the selected file."""
+        values = self.tree.item(item_id, 'values')
+        if not values:
+            return
+            
+        file_name = values[0]
+        file_path = str(Path(values[1]) / file_name)
+        
+        # Find all entries in history for this file
+        file_history = []
+        for i, analysis in enumerate(self.history["analyses"]):
+            for file_info in analysis["file_data"]:
+                if file_info["path"] == values[1] and file_info["name"] == file_name:
+                    file_history.append({
+                        "timestamp": analysis["timestamp"],
+                        "lines": file_info["lines"],
+                        "size": file_info["size"]
+                    })
+                    break
+        
+        if not file_history:
+            messagebox.showinfo("Info", f"No history data found for {file_name}")
+            return
+            
+        self.show_history_chart(file_name, file_history)
+        
+    def show_history_chart(self, file_name: str, file_history: List[Dict[str, Any]]):
+        """Show a chart with lines and size history for a file."""
+        chart_window = tk.Toplevel(self.root)
+        chart_window.title(f"File History: {file_name}")
+        chart_window.geometry("900x600")
+        
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        # Sort by timestamp
+        file_history_sorted = sorted(file_history, key=lambda x: x["timestamp"])
+        
+        timestamps = [datetime.fromisoformat(h["timestamp"]) for h in file_history_sorted]
+        lines = [h["lines"] if h["lines"] >= 0 else 0 for h in file_history_sorted]
+        sizes = [h["size"] if h["size"] >= 0 else 0 for h in file_history_sorted]
+        
+        # Plot lines on left axis
+        color1 = 'tab:blue'
+        ax1.set_xlabel('Date')
+        ax1.set_ylabel('Lines', color=color1, fontweight='bold')
+        
+        # Plot lines with transparency to show overlapping markers
+        line1 = ax1.plot(timestamps, lines, color=color1, marker='o', markersize=12, 
+                         label='Lines', linewidth=2, zorder=5, alpha=0.7)
+        
+        ax1.tick_params(axis='y', labelcolor=color1)
+        ax1.grid(True, alpha=0.3)
+        
+        # Set y-axis limits to ensure data is visible
+        if lines:
+            min_lines = min(lines)
+            max_lines = max(lines)
+            if min_lines == max_lines:
+                # If all values are the same, set range around them
+                margin = max(10, min_lines * 0.1)
+                ax1.set_ylim(max(0, min_lines - margin), min_lines + margin)
+            else:
+                margin = max(1, (max_lines - min_lines) * 0.2)
+                ax1.set_ylim(max(0, min_lines - margin), max_lines + margin)
+        
+        # Create second y-axis for size
+        ax2 = ax1.twinx()
+        color2 = 'tab:red'
+        ax2.set_ylabel('Size (bytes)', color=color2, fontweight='bold')
+        
+        # Plot sizes with transparency to show overlapping markers
+        line2 = ax2.plot(timestamps, sizes, color=color2, marker='s', markersize=12, 
+                         label='Size (bytes)', linewidth=2, zorder=4, alpha=0.7)
+        
+        ax2.tick_params(axis='y', labelcolor=color2)
+        
+        # Set y-axis limits to ensure data is visible
+        if sizes:
+            min_sizes = min(sizes)
+            max_sizes = max(sizes)
+            if min_sizes == max_sizes:
+                # If all values are the same, set range around them
+                margin = max(10, min_sizes * 0.1)
+                ax2.set_ylim(max(0, min_sizes - margin), min_sizes + margin)
+            else:
+                margin = max(1, (max_sizes - min_sizes) * 0.2)
+                ax2.set_ylim(max(0, min_sizes - margin), max_sizes + margin)
+        
+        # Format x-axis dates
+        fig.autofmt_xdate()
+        
+        # Add title
+        plt.title(f'File History: {file_name}', fontweight='bold')
+        
+        # Add legend
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', framealpha=1.0)
+        
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=chart_window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Add close button
+        close_btn = ttk.Button(chart_window, text="Close", command=chart_window.destroy)
+        close_btn.pack(pady=10)
+        
+    def show_history_window(self):
+        """Show window with analysis history."""
+        history_window = tk.Toplevel(self.root)
+        history_window.title("Analysis History")
+        history_window.geometry("1000x600")
+        
+        # Main frame
+        main_frame = ttk.Frame(history_window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Instructions
+        ttk.Label(main_frame, text="Double-click on an analysis to view detailed information").pack(pady=(0, 10))
+        
+        # Create treeview for history
+        columns = ("timestamp", "folder", "files", "lines", "size")
+        history_tree = ttk.Treeview(main_frame, columns=columns, show="headings", selectmode="browse")
+        
+        history_tree.heading("timestamp", text="Date/Time")
+        history_tree.heading("folder", text="Folder")
+        history_tree.heading("files", text="Files")
+        history_tree.heading("lines", text="Lines")
+        history_tree.heading("size", text="Size")
+        
+        history_tree.column("timestamp", width=180)
+        history_tree.column("folder", width=400)
+        history_tree.column("files", width=80)
+        history_tree.column("lines", width=100)
+        history_tree.column("size", width=120)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=history_tree.yview)
+        hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=history_tree.xview)
+        history_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Grid layout
+        history_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+        
+        # Populate history
+        for i, analysis in enumerate(reversed(self.history["analyses"])):
+            timestamp_str = datetime.fromisoformat(analysis["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            history_tree.insert("", tk.END, values=(
+                timestamp_str,
+                analysis["folder"],
+                analysis["total_files"],
+                f"{analysis['total_lines']:,}",
+                self.format_size(analysis["total_size"])
+            ), tags=(str(len(self.history["analyses"]) - 1 - i),))
+        
+        # Bind double click to show details
+        history_tree.bind("<Double-1>", lambda event: self.show_analysis_details(history_window, history_tree))
+        
+        # Close button
+        close_btn = ttk.Button(main_frame, text="Close", command=history_window.destroy)
+        close_btn.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        
+    def show_analysis_details(self, parent_window: tk.Toplevel, history_tree: ttk.Treeview):
+        """Show details for selected analysis."""
+        selection = history_tree.selection()
+        if not selection:
+            return
+            
+        item = selection[0]
+        tags = history_tree.item(item, 'tags')
+        if not tags:
+            return
+            
+        index = int(tags[0])
+        analysis = self.history["analyses"][index]
+        
+        # Create details window
+        details_window = tk.Toplevel(parent_window)
+        details_window.title(f"Analysis Details - {datetime.fromisoformat(analysis['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}")
+        details_window.geometry("1100x700")
+        
+        # Main frame
+        main_frame = ttk.Frame(details_window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Summary info
+        summary_frame = ttk.LabelFrame(main_frame, text="Summary", padding="10")
+        summary_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(summary_frame, text=f"Folder: {analysis['folder']}").pack(anchor=tk.W)
+        ttk.Label(summary_frame, text=f"Total Files: {analysis['total_files']}").pack(anchor=tk.W)
+        ttk.Label(summary_frame, text=f"Total Lines: {analysis['total_lines']:,}").pack(anchor=tk.W)
+        ttk.Label(summary_frame, text=f"Total Size: {self.format_size(analysis['total_size'])}").pack(anchor=tk.W)
+        
+        # Files tree
+        files_frame = ttk.LabelFrame(main_frame, text="Files (Double-click for chart)", padding="5")
+        files_frame.pack(fill=tk.BOTH, expand=True)
+        
+        columns = ("name", "path", "lines", "size", "extension")
+        files_tree = ttk.Treeview(files_frame, columns=columns, show="headings", selectmode="browse")
+        
+        files_tree.heading("name", text="Name", anchor=tk.W)
+        files_tree.heading("path", text="Path", anchor=tk.W)
+        files_tree.heading("lines", text="Lines", anchor=tk.E)
+        files_tree.heading("size", text="Size (bytes)", anchor=tk.E)
+        files_tree.heading("extension", text="Extension", anchor=tk.W)
+        
+        files_tree.column("name", width=200, minwidth=100)
+        files_tree.column("path", width=350, minwidth=150)
+        files_tree.column("lines", width=80, minwidth=50, anchor=tk.E)
+        files_tree.column("size", width=100, minwidth=80, anchor=tk.E)
+        files_tree.column("extension", width=80, minwidth=50)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(files_frame, orient="vertical", command=files_tree.yview)
+        hsb = ttk.Scrollbar(files_frame, orient="horizontal", command=files_tree.xview)
+        files_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Grid layout
+        files_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        files_frame.grid_rowconfigure(0, weight=1)
+        files_frame.grid_columnconfigure(0, weight=1)
+        
+        # Populate files
+        for file_info in analysis["file_data"]:
+            lines_display = str(file_info["lines"]) if file_info["lines"] >= 0 else "N/A"
+            size_display = str(file_info["size"]) if file_info["size"] >= 0 else "N/A"
+            
+            files_tree.insert("", tk.END, values=(
+                file_info["name"],
+                file_info["path"],
+                lines_display,
+                size_display,
+                file_info["extension"]
+            ))
+        
+        # Bind double click to show chart
+        files_tree.bind("<Double-1>", lambda event: self.on_double_click_history(event, files_tree, analysis))
+        
+        # Close button
+        close_btn = ttk.Button(main_frame, text="Close", command=details_window.destroy)
+        close_btn.pack(pady=(10, 0))
+        
+    def on_double_click_history(self, event, files_tree: ttk.Treeview, analysis: Dict[str, Any]):
+        """Handle double click on history files tree."""
+        region = files_tree.identify("region", event.x, event.y)
+        if region == "cell":
+            item = files_tree.identify_row(event.y)
+            if item:
+                values = files_tree.item(item, 'values')
+                file_name = values[0]
+                file_path = values[1]
+                
+                # Find all entries in history for this file
+                file_history = []
+                for hist_analysis in self.history["analyses"]:
+                    for file_info in hist_analysis["file_data"]:
+                        if file_info["path"] == file_path and file_info["name"] == file_name:
+                            file_history.append({
+                                "timestamp": hist_analysis["timestamp"],
+                                "lines": file_info["lines"],
+                                "size": file_info["size"]
+                            })
+                            break
+                
+                if not file_history:
+                    messagebox.showinfo("Info", f"No history data found for {file_name}")
+                    return
+                    
+                self.show_history_chart(file_name, file_history)
         
     def export_to_csv(self):
         """Export the current data to a CSV file."""
